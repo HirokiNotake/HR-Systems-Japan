@@ -1,0 +1,67 @@
+--CORPHRJPPA-HUB-TO-MART14
+WITH Approver_Match AS (
+  SELECT
+    A.Employee_Number,
+    A.Employee_Name,
+    A.Manager_Employee_Number,
+    A.Manager_Name
+  FROM corp_de_hub_hrjppa.corp_hrjppa_hub_approver A
+),
+
+MonthTotal AS (
+  SELECT
+    A.Employee_ID,
+    SUM(Overtime_45h_Above_Count) AS TotalA
+  FROM corp_de_hub_hrjppa.corp_hrjpra_hub_monthly_attendance A
+  WHERE
+    FY = CASE 
+           WHEN MONTH(CURRENT_DATE()) < 4 THEN CAST(YEAR(CURRENT_DATE()) - 1 AS STRING)
+           ELSE CAST(YEAR(CURRENT_DATE()) AS STRING)
+         END
+  GROUP BY A.Employee_ID
+),
+
+DailyAttendance AS (
+  SELECT
+    D.Employee_ID,
+    MAX(D.Employee_Name) AS Employee_Name,
+    CASE 
+      WHEN SUM(D.Daily_Data_36_Agreement_Overtime_Excluding_Holidays) > 2700 THEN 1
+      ELSE 0
+    END AS Overtime_Type
+  FROM corp_de_hub_hrjppa.corp_hrjpra_hub_daily_attendance D
+  WHERE
+    D.Date >= DATE_TRUNC('month', CURRENT_DATE())
+    AND D.Date <= LAST_DAY(CURRENT_DATE())
+    AND D.Actual_Performance_Approval NOT IN ('承認者差戻', '入力途中')  GROUP BY D.Employee_ID
+)
+
+-- メインクエリ：DailyAttendance と MonthTotal を FULL OUTER JOIN
+--INSERT INTO corp_de_mart_hrjppa.corp_hrjpra_mart_alert_for_over_45h_4_times
+SELECT DISTINCT
+  CAST(COALESCE(D.Employee_ID, MT.Employee_ID) AS INT) AS Employee_ID,
+  DATE_FORMAT(CURRENT_DATE(), 'yyyyMM') AS Current_Month,
+  COALESCE(D.Employee_Name, '') AS Employee_Name,
+  COALESCE(MT.TotalA, 0) + COALESCE(D.Overtime_Type, 0) AS Total_Overtime,
+  W.JPN_Management_Area,
+  W.JPN_Management_Area_Name_Japanese,
+  B.Manager_Employee_Number AS Manager_ID,
+  B.Manager_Name AS Manager_Japanese_Name,
+  CONCAT(W2.Preferred_Name_Last_Name_Western, ' ', W2.Preferred_Name_First_Name_Western) AS Manager_English_Name,
+  W2.Primary_email_address_work AS Manager_Mail,
+  date_format(date_add(current_date(),1),'yyyyMMdd') AS Report_Date,
+  NOW() AS Inserted_At
+FROM DailyAttendance D
+FULL OUTER JOIN MonthTotal MT
+  ON D.Employee_ID = MT.Employee_ID
+LEFT JOIN Approver_Match B
+  ON CAST(COALESCE(D.Employee_ID, MT.Employee_ID) AS INT) = B.Employee_Number
+LEFT JOIN corp_de_hub_hrjppa.v_corp_hrjppa_hub_workday W
+  ON COALESCE(D.Employee_ID, MT.Employee_ID) = W.Employee_ID
+LEFT JOIN corp_de_hub_hrjppa.v_corp_hrjppa_hub_workday W2
+  ON B.Manager_Employee_Number = CAST(W2.Employee_ID AS INT)
+WHERE COALESCE(MT.TotalA, 0) + COALESCE(D.Overtime_Type, 0) >= 4
+  AND UPPER(W.Worker_Status) <> 'TERMINATED'
+  AND W.Employee_ID IS NOT NULL
+  AND W.Work_Shift_Name_Japanese NOT LIKE '%幹部%'
+  AND W.Work_Shift_Name_Japanese NOT LIKE '%海外%'
